@@ -174,6 +174,9 @@ class Worker:
 
     def _wait_if_unavailable(self, acc: Account) -> bool:
         """Sleep through freezes and spent budgets. Returns False if the account should exit."""
+        if acc.state.needs_manual_verification():
+            acc.stats["stopped"] = "needs manual verification"
+            return False
         frozen, reason, until = acc.state.frozen()
         if frozen:
             if self.until_empty:

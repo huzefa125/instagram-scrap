@@ -136,7 +136,9 @@ def cmd_status(config) -> None:
         doc = state.get()
         holder = state.lock_holder()
         flags = []
-        if frozen:
+        if state.needs_manual_verification():
+            flags.append("NEEDS MANUAL VERIFICATION (confirm in the app, then `verified --account`)")
+        elif frozen:
             flags.append(f"FROZEN until {until} ({reason})")
         if doc.get("needs_login"):
             flags.append("NEEDS LOGIN")
@@ -155,6 +157,14 @@ def cmd_status(config) -> None:
         for name, count in Counter(e["exception"] for e in events).most_common():
             print(f"  {count:5d}  {name}")
         print("  by account: " + ", ".join(f"{a} {c}" for a, c in Counter(e["account"] for e in events).most_common()))
+
+
+def cmd_verified(config, account: str) -> None:
+    cfg = next((a for a in load_accounts(config) if a.username == account), None)
+    if cfg is None:
+        raise SystemExit(f"Unknown account {account}")
+    AccountState(open_store(config), cfg.username, cfg.proxy).clear_manual_verification()
+    print(f"{account}: cleared. It will log in again the next time a worker starts.")
 
 
 def cmd_warmup(config, account: str | None, set_level: int | None, ready: bool, restart: bool) -> None:
@@ -362,6 +372,8 @@ def main() -> None:
     enqueue.add_argument("--retry-failed", action="store_true", help="queue failed/skipped influencers again")
     sub.add_parser("worker", help="always-on worker for this server's accounts")
     sub.add_parser("status")
+    verified = sub.add_parser("verified", help="after confirming a challenged account in the Instagram app, let it work again")
+    verified.add_argument("--account", required=True)
     warm = sub.add_parser("warmup", help="show or adjust each account's warm-up ramp")
     warm.add_argument("--account", help="only this account (required to change it)")
     warm.add_argument("--set", type=int, dest="set_level", help="set today's limit for the account")
@@ -413,6 +425,8 @@ def main() -> None:
         cmd_worker(config)
     elif args.command == "api":
         cmd_api(args.host, args.port, args.worker)
+    elif args.command == "verified":
+        cmd_verified(config, args.account)
     elif args.command == "warmup":
         cmd_warmup(config, args.account, args.set_level, args.ready, args.restart)
     elif args.command == "activity":

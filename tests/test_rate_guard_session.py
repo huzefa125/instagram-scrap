@@ -2,7 +2,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from instagrapi.exceptions import ClientUnauthorizedError
+from instagrapi.exceptions import ChallengeRequired, ClientUnauthorizedError
 
 from scraper.accounts.rate_limit import RateGuard, StopRun
 
@@ -22,6 +22,9 @@ class FakeAccount:
 
     def count_request(self, n=1):
         self.count += n
+
+    def require_manual_verification(self, reason):
+        self.parked = reason
 
     def log_event(self, method, exc, last_json, status_code, action):
         self.events.append(action)
@@ -49,6 +52,25 @@ class UnauthorizedTest(unittest.TestCase):
         self.assertEqual(len(logins), 1)
         self.assertEqual(len(calls), 2)       # first try + one try after re-login, nothing more
         self.assertEqual(account.count, 2)
+
+
+class ChallengeTest(unittest.TestCase):
+    def test_challenge_parks_account_for_manual_verification(self):
+        config = SimpleNamespace(max_requests_per_day=100, max_requests_per_run=None, delay_min=0, delay_max=0,
+                                 warmup_delay_min=0, warmup_delay_max=0)
+        session = SimpleNamespace(client=SimpleNamespace(last_json={}, last_response=None))
+        account = FakeAccount()
+        guard = RateGuard(config, session, account, max_per_day=100, max_per_run=None)
+
+        def blocked():
+            raise ChallengeRequired()
+
+        with patch("scraper.accounts.rate_limit.time.sleep"):
+            with self.assertRaises(StopRun) as ctx:
+                guard.call(blocked)
+        self.assertEqual(ctx.exception.kind, "frozen")
+        self.assertTrue(hasattr(account, "parked"))
+        self.assertEqual(account.count, 1)     # no retry
 
 
 class HttpCountTest(unittest.TestCase):

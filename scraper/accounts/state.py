@@ -52,6 +52,23 @@ class AccountState:
         })
         return until
 
+    def needs_manual_verification(self) -> bool:
+        return bool(self.get().get("requires_manual_verification"))
+
+    def require_manual_verification(self, reason: str) -> None:
+        """Instagram challenged this account: keep it out of every queue and never log it in again
+        until a person has confirmed it in the app and run `verified --account`."""
+        self.store.upsert("account_state", self.username, {
+            "requires_manual_verification": True, "freeze_reason": reason,
+            "frozen_until": (_now() + timedelta(days=36500)).isoformat(),
+            "last_block_at": _now().isoformat(), "warmup_block_applied": False,
+        })
+
+    def clear_manual_verification(self) -> None:
+        self.store.upsert("account_state", self.username, {
+            "requires_manual_verification": False, "frozen_until": None, "freeze_reason": None,
+        })
+
     # --- server lock: one account runs on one server at a time -------------
 
     def acquire_lock(self, owner: str, ttl: timedelta) -> bool:

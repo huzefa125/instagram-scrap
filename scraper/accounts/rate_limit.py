@@ -7,7 +7,8 @@ differently, following instagrapi's best-practices guide:
   PleaseWaitFewMinutes          one 30 min cooldown; a second one stops and freezes the account 6 h
   ClientConnectionError         network problem: short retries, then stop (no freeze)
   FeedbackRequired              action blocked: stop, freeze 24 h
-  ChallengeRequired             stop, freeze 12 h; verify in the Instagram app (never auto-resolved)
+  ChallengeRequired             stop and park the account (requires_manual_verification); it is never
+                                logged in again until `verified --account X` after you confirm it in the app
   LoginRequired / 401           log in again with the same device once, then stop (a 401 means the
                                 session is gone; retrying it would only burn the daily budget)
 
@@ -45,7 +46,7 @@ T = TypeVar("T")
 THROTTLE_BACKOFF = [300, 900, 1800]   # 429: 5, 15, 30 minutes
 NETWORK_RETRIES = [10, 30, 60]        # timeouts / connection resets
 PLEASE_WAIT_COOLDOWN = 1800           # 30 minutes
-FREEZE_HOURS = {"please_wait": 6, "feedback": 24, "challenge": 12}
+FREEZE_HOURS = {"please_wait": 6, "feedback": 24}
 
 
 class StopRun(Exception):
@@ -104,6 +105,10 @@ class RateGuard:
         )
 
     def _stop_and_freeze(self, kind: str, method: str, exc: Exception, reason: str) -> StopRun:
+        if kind == "challenge":
+            self.account.require_manual_verification(reason)
+            self._record(method, exc, "stop, parked until manual verification")
+            return StopRun(f"{reason}. Account parked until you run `verified --account {self.account.username}`.", "frozen")
         until = self.account.freeze(FREEZE_HOURS[kind], reason)
         self._record(method, exc, f"stop, frozen until {until}")
         return StopRun(f"{reason}. Account frozen until {until}.", "frozen")

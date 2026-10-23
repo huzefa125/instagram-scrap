@@ -5,7 +5,7 @@ import logging
 import re
 from pathlib import Path
 
-from instagrapi.exceptions import ClientError
+from instagrapi.exceptions import ChallengeRequired, ClientError
 
 from ..accounts.state import AccountState
 from .collectors import Collector
@@ -62,6 +62,8 @@ def why_not_ready(config: Config, store, account: AccountConfig, force: bool,
                   need_session: bool) -> str | None:
     """Reason this account can't work now, or None if it can."""
     state = AccountState(store, account.username, account.proxy)
+    if state.needs_manual_verification():
+        return f"needs manual verification (confirm in the app, then `verified --account {account.username}`)"
     frozen, reason, until = state.frozen()
     if frozen and not force:
         return f"frozen until {until}: {reason}"
@@ -86,7 +88,9 @@ def build_accounts(config: Config, store, force: bool, interactive: bool,
         raise CannotStart("No accounts. Add IG_USERNAME_1... to .env, or create accounts.json.")
     for acc in configured:
         state = AccountState(store, acc.username, acc.proxy)
-        if always_on:
+        if state.needs_manual_verification():
+            reason = why_not_ready(config, store, acc, force, need_session=False)
+        elif always_on:
             reason = None if interactive or session_file(config, acc.username).exists()                 else "no saved session (run `python -m scraper login`)"
         else:
             reason = why_not_ready(config, store, acc, force, need_session=not interactive)
@@ -105,6 +109,12 @@ def build_accounts(config: Config, store, force: bool, interactive: bool,
         session = SessionManager(config, acc)
         try:
             client = session.login(interactive=interactive)
+        except ChallengeRequired as exc:
+            state.require_manual_verification("Instagram asked for verification at login")
+            state.log_event("login", exc, last_json=None, status_code=None, action="parked until manual verification")
+            state.release_lock(config.worker_id)
+            skipped[acc.username] = "challenge at login: parked until manual verification"
+            continue
         except ClientError as exc:
             state.release_lock(config.worker_id)
             skipped[acc.username] = f"login failed: {type(exc).__name__}"

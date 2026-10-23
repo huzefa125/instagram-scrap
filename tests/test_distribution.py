@@ -98,6 +98,9 @@ class WorkerDistributionTests(unittest.TestCase):
             def frozen(self):
                 return False, None, None
 
+            def needs_manual_verification(self):
+                return False
+
             def effective_limit(self, max_per_day, config):
                 return max_per_day
 
