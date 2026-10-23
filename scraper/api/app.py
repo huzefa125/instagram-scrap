@@ -13,7 +13,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Security
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Security
+from fastapi.responses import RedirectResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
@@ -75,20 +76,58 @@ async def lifespan(_app):
     _stop_worker()
 
 
+DESCRIPTION = """
+Collect an influencer's posts, likers, commenters and audience, then read it back as JSON.
+
+## Quick start (3 steps)
+1. **Request**: `POST /scrape/{username}` with e.g. `narendramodi`.
+2. **Watch**: `GET /scrape/{username}` until `state` is `complete` (`percent_done` shows progress).
+3. **Download**: `GET /influencers/{username}/export` gives everything in one JSON.
+
+Nothing is collected unless a worker is running (`python -m scraper worker`, or start this API with `--worker`).
+`GET /health` and `GET /accounts` tell you if the workers and accounts are fine.
+
+Each account has its own proxy, session, daily budget and freeze state. An account that Instagram
+challenged stays parked until you confirm it in the Instagram app and call `POST /accounts/{username}/verified`.
+
+If `API_KEY` is set, press **Authorize** (top right) and enter it once; Swagger remembers it.
+"""
+
+TAGS = [
+    {"name": "Scrape", "description": "**Start here.** Request one influencer and follow its progress."},
+    {"name": "Export", "description": "Download the collected data of one influencer as a single JSON."},
+    {"name": "Accounts", "description": "Instagram accounts: budget, warm-up, freezes. Fix a challenged account here."},
+    {"name": "System", "description": "Health, errors and overall status."},
+    {"name": "Influencers", "description": "Browse stored influencers, posts and audience."},
+    {"name": "Analytics", "description": "Audience analytics and overlap between influencers."},
+    {"name": "Audience", "description": "One deduplicated audience member."},
+    {"name": "Jobs", "description": "Queue many influencers at once and see the queue."},
+]
+
 app = FastAPI(
     title="Instagram Audience API",
-    version="2.0.0",
-    description=(
-        "Read collected influencer, post and audience data, get audience analytics, "
-        "and add influencers to the collection queue.\n\n"
-        "`POST /jobs` only queues influencers. Workers (`python -m scraper worker`, one per server) "
-        "pick them up: **engagement** accounts collect profiles, posts, likers and commenters; "
-        "**audience** accounts look up each unique engager's public profile and recent posts. "
-        "Each account keeps its own proxy, session, daily budget, freeze state and server lock."
-    ),
+    version="2.1.0",
+    description=DESCRIPTION,
+    openapi_tags=TAGS,
     dependencies=[Depends(require_key)],
     lifespan=lifespan,
+    swagger_ui_parameters={
+        "persistAuthorization": True,       # keep the API key after a refresh
+        "displayRequestDuration": True,
+        "docExpansion": "none",             # sections start collapsed, open the one you need
+        "filter": True,                     # search box
+        "tryItOutEnabled": True,            # "Try it out" is already on
+        "defaultModelsExpandDepth": -1,     # hide the long schema list at the bottom
+    },
 )
+
+
+@app.get("/", include_in_schema=False)
+def home() -> RedirectResponse:
+    return RedirectResponse("/docs")
+
+
+UsernamePath = Path(description="Instagram username, @name or profile URL", examples=["narendramodi"])
 
 # --- models -----------------------------------------------------------------
 
@@ -151,6 +190,13 @@ class JobRequest(BaseModel):
     )
     limit: int | None = Field(None, ge=1, description="Only process the first N usernames")
     retry_failed: bool = Field(False, description="Queue influencers that failed or were skipped again")
+    posts: int | None = Field(None, ge=1, le=100, description="Posts per influencer (default: POSTS_PER_INFLUENCER)")
+    likers: int | None = Field(None, ge=0, le=5000, description="Likers per post (default: LIKERS_PER_POST)")
+    comments: int | None = Field(None, ge=0, le=5000, description="Comments per post (default: COMMENTS_PER_POST)")
+    enrich_profiles: int | None = Field(
+        None, ge=0, le=100000,
+        description="How many engagers get a full profile + recent posts lookup. 0 = everyone "
+                    "(default: AUDIENCE_PROFILES_PER_INFLUENCER)")
 
 
 class EnqueueResult(BaseModel):
@@ -248,7 +294,7 @@ def status() -> StatusResponse:
     )
 
 
-@app.get("/accounts", tags=["System"], response_model=list[AccountStatus],
+@app.get("/accounts", tags=["Accounts"], response_model=list[AccountStatus],
          summary="Every Instagram account: role, session, budget, freeze")
 def accounts() -> list[AccountStatus]:
     return _account_statuses()
@@ -283,7 +329,7 @@ def list_influencers(
 
 
 @app.get("/influencers/{username}", tags=["Influencers"], summary="Full influencer profile")
-def get_influencer(username: str) -> dict:
+def get_influencer(username: str = UsernamePath) -> dict:
     doc = _get_influencer(username)
     out = {k: v for k, v in doc.items() if k not in HEAVY_FIELDS}
     out["posts_collected"] = len(doc.get("post_ids", []))
@@ -294,7 +340,7 @@ def get_influencer(username: str) -> dict:
 
 @app.get("/influencers/{username}/posts", tags=["Influencers"], response_model=Page)
 def influencer_posts(
-    username: str,
+    username: str = UsernamePath,
     include_engagement: bool = Query(False, description="Include liker ids and comments"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=500),
@@ -309,7 +355,7 @@ def influencer_posts(
 
 @app.get("/influencers/{username}/audience", tags=["Influencers"], response_model=Page)
 def influencer_audience(
-    username: str,
+    username: str = UsernamePath,
     enriched: bool | None = Query(None, description="Only users with (true) or without (false) full profiles"),
     is_private: bool | None = Query(None),
     skip: int = Query(0, ge=0),
@@ -326,12 +372,12 @@ def influencer_audience(
 
 
 @app.get("/influencers/{username}/analytics", tags=["Analytics"], summary="Audience analytics for one influencer")
-def influencer_analytics(username: str) -> dict:
+def influencer_analytics(username: str = UsernamePath) -> dict:
     return analytics.influencer_analytics(store, _get_influencer(username)["_id"])
 
 
 @app.get("/influencers/{username}/overlap", tags=["Analytics"], summary="Influencers sharing this audience")
-def influencer_overlap(username: str, top: int = Query(20, ge=1, le=200)) -> dict:
+def influencer_overlap(username: str = UsernamePath, top: int = Query(20, ge=1, le=200)) -> dict:
     return analytics.audience_overlap(store, _get_influencer(username)["_id"], top)
 
 
@@ -368,7 +414,8 @@ def enqueue_jobs(body: JobRequest) -> EnqueueResult:
     if not usernames:
         raise HTTPException(status_code=400, detail="No usernames given and influencers.csv is missing or empty")
     queue = WorkQueue(store)
-    counts = queue.enqueue(usernames, retry_failed=body.retry_failed)
+    counts = queue.enqueue(usernames, retry_failed=body.retry_failed, options={
+        "posts": body.posts, "likers": body.likers, "comments": body.comments, "enrich_profiles": body.enrich_profiles})
     return EnqueueResult(usernames=len(usernames), **counts, queue=queue.counts())
 
 
@@ -415,16 +462,90 @@ def _scrape_status(username: str, partial: bool = False) -> ScrapeStatus:
 
 @app.post("/scrape/{username}", tags=["Scrape"], response_model=ScrapeStatus, status_code=202,
           summary="Request one influencer (username, @name or profile URL)")
-def request_scrape(username: str, retry_failed: bool = Query(False, description="Request again if it failed or was skipped")) -> ScrapeStatus:
+def request_scrape(
+    username: str = UsernamePath,
+    retry_failed: bool = Query(False, description="Request again if it failed or was skipped"),
+    posts: int | None = Query(None, ge=1, le=100, description="Posts to collect (default from .env)"),
+    likers: int | None = Query(None, ge=0, le=5000, description="Likers per post (default from .env)"),
+    comments: int | None = Query(None, ge=0, le=5000, description="Comments per post (default from .env)"),
+    enrich_profiles: int | None = Query(
+        None, ge=0, le=100000,
+        description="How many engagers get a full profile + recent posts lookup. 0 = everyone (default from .env)"),
+) -> ScrapeStatus:
     names = clean_usernames([username])
     if not names:
         raise HTTPException(status_code=400, detail="Empty username")
-    WorkQueue(store).enqueue(names, retry_failed=retry_failed)
+    WorkQueue(store).enqueue(names, retry_failed=retry_failed, options={
+        "posts": posts, "likers": likers, "comments": comments, "enrich_profiles": enrich_profiles})
     return _scrape_status(names[0])
 
 
 @app.get("/scrape/{username}", tags=["Scrape"], response_model=ScrapeStatus,
          summary="Progress of one influencer, and its analytics when complete")
-def scrape_status(username: str, partial: bool = Query(False, description="Include analytics before the audience is complete")) -> ScrapeStatus:
+def scrape_status(username: str = UsernamePath, partial: bool = Query(False, description="Include analytics before the audience is complete")) -> ScrapeStatus:
     names = clean_usernames([username])
     return _scrape_status(names[0] if names else username, partial)
+
+
+# --- export: everything for one influencer in one JSON ---------------------------
+
+_USER_FIELDS = ("username", "full_name", "is_private", "is_verified", "follower_count",
+                "following_count", "media_count", "biography", "category", "public_email",
+                "contact_phone_number", "recent_posts")
+
+
+def _user_row(user_id: str, audience: dict) -> dict:
+    doc = audience.get(user_id) or {}
+    return {"user_id": user_id, **{k: doc[k] for k in _USER_FIELDS if k in doc}}
+
+
+@app.get("/influencers/{username}/export", tags=["Export"],
+         summary="Everything collected for one influencer as one JSON (posts, likers, comments)")
+def export_influencer(
+    username: str = UsernamePath,
+    posts: int = Query(10, ge=1, le=100, description="Newest N posts"),
+    likers: int = Query(200, ge=0, le=5000, description="Max likers per post"),
+    comments: int = Query(200, ge=0, le=5000, description="Max comments per post"),
+) -> dict:
+    inf = _get_influencer(username)
+    ids = inf.get("post_ids", [])[:posts]
+    found = store.get_many("posts", ids)
+    post_docs = [found[i] for i in ids if i in found]
+    user_ids = {u for p in post_docs for u in p.get("liker_ids", [])[:likers]}
+    user_ids |= {c["user_id"] for p in post_docs for c in p.get("comments", [])[:comments] if c.get("user_id")}
+    audience = store.get_many("audience", list(user_ids))
+    out_posts = []
+    for p in post_docs:
+        row = {k: v for k, v in p.items() if k not in ("liker_ids", "comments", "engagement_done")}
+        row["likers"] = [_user_row(u, audience) for u in p.get("liker_ids", [])[:likers]]
+        row["comments"] = [{**_user_row(c.get("user_id"), audience), "text": c.get("text"),
+                            "created_at": c.get("created_at")} for c in p.get("comments", [])[:comments]]
+        out_posts.append(row)
+    return {"influencer": {k: v for k, v in inf.items() if k not in HEAVY_FIELDS}, "posts": out_posts}
+
+
+# --- account actions ----------------------------------------------------------------
+
+
+def _account_state(username: str) -> AccountState:
+    acc = next((a for a in load_accounts(config) if a.username == username), None)
+    if acc is None:
+        raise HTTPException(status_code=404, detail=f"Unknown account '{username}'")
+    return AccountState(store, acc.username, acc.proxy)
+
+
+@app.post("/accounts/{username}/verified", tags=["Accounts"],
+          summary="I confirmed this challenged account in the Instagram app: let it work again")
+def account_verified(username: str = Path(description="Instagram account from .env", examples=["neer0989"])) -> dict:
+    _account_state(username).clear_manual_verification()
+    return {"account": username, "cleared": True, "note": "It logs in again the next time a worker starts."}
+
+
+@app.post("/accounts/{username}/warmup", tags=["Accounts"],
+          summary="Set today's request limit for an account (warm-up)")
+def account_warmup(
+    username: str = Path(description="Instagram account from .env", examples=["manan8754995"]),
+    limit_today: int = Query(..., ge=1, le=500, description="Requests allowed today"),
+) -> dict:
+    _account_state(username).set_warmup_level(limit_today)
+    return {"account": username, "limit_today": limit_today}

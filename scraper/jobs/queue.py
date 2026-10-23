@@ -33,7 +33,11 @@ class WorkQueue:
 
     # --- influencers --------------------------------------------------------
 
-    def enqueue(self, usernames: list[str], retry_failed: bool = False) -> dict:
+    def enqueue(self, usernames: list[str], retry_failed: bool = False, options: dict | None = None) -> dict:
+        """options (all optional): posts, likers, comments, enrich_profiles for these influencers.
+        Stored on the checkpoint; they apply while the influencer has not finished."""
+        options = {k: v for k, v in (options or {}).items() if v is not None}
+        extra = {"options": options} if options else {}
         existing = self.store.get_many("checkpoints", usernames)
         counts = {"enqueued": 0, "already_queued": 0, "already_done": 0, "requeued": 0}
         now = _iso(_now())
@@ -41,15 +45,17 @@ class WorkQueue:
             cp = existing.get(username)
             if cp is None:
                 self.store.insert_if_missing("checkpoints", username, {
-                    "status": "queued", "done": [], "attempts": 0, "enqueued_at": now, **NO_LEASE,
+                    "status": "queued", "done": [], "attempts": 0, "enqueued_at": now, **NO_LEASE, **extra,
                 })
                 counts["enqueued"] += 1
             elif cp.get("status") in ("failed", "skipped") and retry_failed:
-                self.store.upsert("checkpoints", username, {"status": "queued", "attempts": 0, "enqueued_at": now, **NO_LEASE})
+                self.store.upsert("checkpoints", username, {"status": "queued", "attempts": 0, "enqueued_at": now, **NO_LEASE, **extra})
                 counts["requeued"] += 1
             elif cp.get("status") == "complete" or cp.get("status") in ("failed", "skipped"):
                 counts["already_done"] += 1
             else:
+                if extra:
+                    self.store.upsert("checkpoints", username, extra)
                 counts["already_queued"] += 1
         return counts
 

@@ -6,7 +6,7 @@ InfluencerWorker (engagement accounts), per influencer, resumable via checkpoint
   engagement  Post Engagement -> Likers (LIKERS_PER_POST) + Commenters -> Unique Profile Deduplication
 
 AudienceWorker (audience accounts), per unique engager:
-  Public Profile Data + Recent Profile Posts (AUDIENCE_RECENT_POSTS)
+  Public Profile Data + Recent Profile Posts (AUDIENCE_RECENT_POSTS); private accounts are skipped
 """
 
 import logging
@@ -70,7 +70,7 @@ class InfluencerWorker:
         self.store.upsert("influencers", username, profile)
 
     def stage_posts(self, username: str, influencer: dict) -> None:
-        posts = self.collector.recent_posts(influencer["user_id"], self.config.posts_per_influencer)
+        posts = self.collector.recent_posts(influencer["user_id"], self._option(username, "posts", self.config.posts_per_influencer))
         existing = self.store.get_many("posts", [p["id"] for p in posts])
         for post in posts:
             if post["id"] not in existing:
@@ -91,8 +91,8 @@ class InfluencerWorker:
             if post.get("engagement_done"):
                 continue
             try:
-                likers = self.collector.likers(post_id, self.config.likers_per_post)
-                comments = self.collector.commenters(post_id, self.config.comments_per_post)
+                likers = self.collector.likers(post_id, self._option(username, "likers", self.config.likers_per_post))
+                comments = self.collector.commenters(post_id, self._option(username, "comments", self.config.comments_per_post))
             except (MediaNotFound, MediaUnavailable) as exc:
                 self.store.upsert("posts", post_id, {"engagement_done": True, "error": type(exc).__name__})
                 continue
@@ -121,12 +121,22 @@ class InfluencerWorker:
     def _mark_sample(self, username: str, audience_ids: list[str]) -> None:
         """Sample mode (AUDIENCE_PROFILES_PER_INFLUENCER = N > 0): queue N engagers for lookup.
         Same random sample every time for this influencer. In full mode everyone is already queued."""
-        cap = self.config.audience_profiles_per_influencer
+        cap = self._enrich_cap(username)
         if not cap:
             return
-        ids = list(audience_ids)
+        found = self.store.get_many("audience", list(audience_ids))
+        ids = [i for i in audience_ids if not (found.get(i) or {}).get("is_private")]   # private accounts are never looked up
         random.Random(username).shuffle(ids)
         self.store.update_many("audience", ids[:cap], {"wanted": True})
+
+    def _option(self, username: str, key: str, default: int) -> int:
+        """Per-request number given with the job (POST /scrape ... ?enrich_profiles=200), else the .env default."""
+        value = ((self.store.get("checkpoints", username) or {}).get("options") or {}).get(key)
+        return default if value is None else int(value)
+
+    def _enrich_cap(self, username: str) -> int:
+        """How many engagers get a full profile lookup: N > 0 = a random sample of N, 0 = everyone."""
+        return self._option(username, "enrich_profiles", self.config.audience_profiles_per_influencer)
 
     def _record_audience(self, user: dict, influencer: str, kind: str) -> str:
         """Unique Profile Deduplication: one audience doc per user id, shared across influencers."""
@@ -137,7 +147,7 @@ class InfluencerWorker:
             **{k: user.get(k) for k in USER_FIELDS},
             "enriched": False,
             # Queued for an audience lookup right away in full mode; sample mode picks later.
-            "wanted": not self.config.audience_profiles_per_influencer,
+            "wanted": not self._enrich_cap(influencer) and not user.get("is_private"),
             "lease_until": None,
             "first_seen": _now(),
         })
@@ -154,6 +164,10 @@ class AudienceWorker:
 
     def enrich(self, user_id: str) -> None:
         """Public profile + recent posts for one engager. Raises StopRun to the caller."""
+        if (self.store.get("audience", user_id) or {}).get("is_private"):
+            # Already known to be private from the likers / commenters list: no request, no lookup.
+            self.store.upsert("audience", user_id, {"wanted": False, "lease_until": None, "claimed_by": None})
+            return
         try:
             profile = self.collector.public_profile(user_id)
         except (NotFoundError, PrivateAccount) as exc:
