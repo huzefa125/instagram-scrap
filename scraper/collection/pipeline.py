@@ -16,9 +16,9 @@ from typing import Callable
 
 from instagrapi.exceptions import ClientError, MediaNotFound, MediaUnavailable, NotFoundError, PrivateAccount
 
-from .checkpoint import Checkpoints
+from ..jobs.checkpoint import Checkpoints
 from .collectors import Collector
-from .config import Config
+from ..core.config import Config
 
 log = logging.getLogger(__name__)
 

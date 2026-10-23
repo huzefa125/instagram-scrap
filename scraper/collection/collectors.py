@@ -2,7 +2,7 @@
 
 from instagrapi import Client
 
-from .ratelimit import RateGuard
+from ..accounts.rate_limit import RateGuard
 
 
 def _dump(model) -> dict:

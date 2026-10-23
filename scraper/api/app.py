@@ -17,13 +17,13 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Security
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 
-from . import analytics
-from .account import AccountState, proxy_host
-from .config import ROOT, load_accounts, load_config
-from .jobqueue import WorkQueue
-from .runner import CannotStart, build_accounts, clean_usernames, daily_limit, read_usernames, why_not_ready
-from .worker import Worker
-from .storage import open_store
+from ..analytics import service as analytics
+from ..accounts.state import AccountState, proxy_host
+from ..core.config import ROOT, load_accounts, load_config
+from ..jobs.queue import WorkQueue
+from ..collection.runner import CannotStart, build_accounts, clean_usernames, daily_limit, read_usernames, why_not_ready
+from ..jobs.worker import Worker
+from ..storage.store import open_store
 
 log = logging.getLogger(__name__)
 config = load_config()
@@ -118,7 +118,11 @@ class AccountStatus(BaseModel):
     proxy: str | None = Field(None, description="Proxy host only, never credentials")
     has_session: bool
     requests_today: int
+    limit_today: int = Field(description="Today's limit after warm-up")
     max_requests_per_day: int
+    warmup_stage: str = Field(description="warming | ready | off")
+    warmup_day: int = 0
+    working_days_to_max: int = 0
     frozen: bool
     frozen_until: str | None = None
     freeze_reason: str | None = None
@@ -190,7 +194,7 @@ def _summary(doc: dict, cp: dict | None) -> InfluencerSummary:
 
 
 def _account_statuses() -> list[AccountStatus]:
-    from .session import session_file
+    from ..accounts.session import session_file
 
     rows = []
     for acc in load_accounts(config):
@@ -200,7 +204,10 @@ def _account_statuses() -> list[AccountStatus]:
         rows.append(AccountStatus(
             username=acc.username, role=acc.role, proxy=proxy_host(acc.proxy),
             has_session=session_file(config, acc.username).exists(),
-            requests_today=state.requests_today(), max_requests_per_day=daily_limit(config, acc),
+            requests_today=state.requests_today(),
+            limit_today=(w := state.warmup_info(daily_limit(config, acc), config))["limit_today"],
+            max_requests_per_day=daily_limit(config, acc),
+            warmup_stage=w["stage"], warmup_day=w["day"], working_days_to_max=w["working_days_to_max"],
             frozen=frozen, frozen_until=until, freeze_reason=reason,
             ready=not_ready is None, not_ready_reason=not_ready,
             running_on=state.lock_holder(), needs_login=bool(state.get().get("needs_login")),

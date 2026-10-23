@@ -8,7 +8,11 @@ differently, following instagrapi's best-practices guide:
   ClientConnectionError         network problem: short retries, then stop (no freeze)
   FeedbackRequired              action blocked: stop, freeze 24 h
   ChallengeRequired             stop, freeze 12 h; verify in the Instagram app (never auto-resolved)
-  LoginRequired                 log in again with the same device once, then stop
+  LoginRequired / 401           log in again with the same device once, then stop (a 401 means the
+                                session is gone; retrying it would only burn the daily budget)
+
+The daily / per-run budget counts real HTTP requests (SessionManager counts them), not just guard
+calls. While an account is still warming up it also waits WARMUP_DELAY_MIN..MAX between calls.
 
 Every exception is written to the `events` collection.
 """
@@ -23,14 +27,16 @@ from instagrapi.exceptions import (
     ClientConnectionError,
     ClientError,
     ClientThrottledError,
+    ClientUnauthorizedError,
     FeedbackRequired,
     LoginRequired,
     PleaseWaitFewMinutes,
     RateLimitError,
 )
 
-from .account import AccountState
-from .config import Config
+from .state import AccountState
+from ..core.config import Config
+from ..observability import span
 from .session import SessionManager
 
 log = logging.getLogger(__name__)
@@ -70,11 +76,22 @@ class RateGuard:
         self.requests = 0
         self.please_wait_seen = False
 
-    def _check_budget(self) -> None:
+    def _check_budget(self) -> bool:
+        """Raise StopRun when out of budget; return True while the account is still warming up."""
         if self.max_per_run is not None and self.requests >= self.max_per_run:
             raise StopRun(f"Run budget reached ({self.max_per_run} requests)", "budget_run")
-        if self.account.requests_today() >= self.max_per_day:
-            raise StopRun(f"Daily budget reached ({self.max_per_day} requests today)", "budget_day")
+        limit = self.account.effective_limit(self.max_per_day, self.config)
+        if self.account.requests_today() >= limit:
+            note = "" if limit >= self.max_per_day else f", warm-up limit (max {self.max_per_day})"
+            raise StopRun(f"Daily budget reached ({limit} requests today{note})", "budget_day")
+        return limit < self.max_per_day
+
+    def _count_extra(self, before: int) -> None:
+        """One guard call can send many HTTP requests (comment / liker pages); count every one."""
+        extra = getattr(self.session, "http_requests", before) - before - 1
+        if extra > 0:
+            self.requests += extra
+            self.account.count_request(extra)
 
     def _record(self, method: str, exc: Exception, action: str) -> None:
         client = self.session.client
@@ -97,12 +114,16 @@ class RateGuard:
         throttle_attempt = 0
         network_attempt = 0
         while True:
-            self._check_budget()
-            time.sleep(random.uniform(self.config.delay_min, self.config.delay_max))
+            warming = self._check_budget()
+            lo, hi = ((self.config.warmup_delay_min, self.config.warmup_delay_max) if warming
+                      else (self.config.delay_min, self.config.delay_max))
+            time.sleep(random.uniform(lo, hi))
             self.requests += 1
             self.account.count_request()
+            before = getattr(self.session, "http_requests", 0)
             try:
-                return fn(*args, **kwargs)
+                with span(f"ig.{method}", self.account.username):
+                    return fn(*args, **kwargs)
 
             except ChallengeRequired as exc:
                 raise self._stop_and_freeze(
@@ -115,7 +136,7 @@ class RateGuard:
                 message = last_json.get("feedback_message") or str(exc)
                 raise self._stop_and_freeze("feedback", method, exc, f"Action blocked: {message}") from exc
 
-            except LoginRequired as exc:
+            except (LoginRequired, ClientUnauthorizedError) as exc:
                 if relogged:
                     self._record(method, exc, "stop")
                     raise StopRun("Session lost again after re-login. Check the account in the app", "session") from exc
@@ -162,3 +183,6 @@ class RateGuard:
                 # Not a block (user not found, private account, ...): log it, let the pipeline decide.
                 self._record(method, exc, "raised")
                 raise
+
+            finally:
+                self._count_extra(before)

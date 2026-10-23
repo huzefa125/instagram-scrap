@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
-from .config import Config
+from ..core.config import Config
 
 
 def _replace(src: Path, dst: Path, attempts: int = 20) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 from instagrapi import Client
 from instagrapi.exceptions import TwoFactorRequired
 
-from .config import AccountConfig, Config
+from ..core.config import AccountConfig, Config
 
 log = logging.getLogger(__name__)
 
@@ -22,15 +22,26 @@ class SessionManager:
         self.config = config
         self.account = account
         self.settings_path = session_file(config, account.username)
+        self.http_requests = 0     # every real HTTP request this session sent; RateGuard budgets on it
         self.client = self._new_client()
 
     def _new_client(self) -> Client:
         client = Client()
         if self.account.proxy:
             client.set_proxy(self.account.proxy)
-        # Request pacing is handled by RateGuard; keep instagrapi's own delay off.
-        client.delay_range = None
+        # RateGuard paces whole calls (DELAY_MIN..DELAY_MAX); this adds a short random pause after
+        # every underlying HTTP request, as the instagrapi best-practices guide recommends.
+        client.delay_range = [1, 3]
+        for name in ("private_request", "public_request"):
+            client_call = getattr(client, name)
+            setattr(client, name, self._counted(client_call))
         return client
+
+    def _counted(self, send):
+        def wrapper(*args, **kwargs):
+            self.http_requests += 1
+            return send(*args, **kwargs)
+        return wrapper
 
     def login(self, interactive: bool = True) -> Client:
         if not self.account.username or not self.account.password:

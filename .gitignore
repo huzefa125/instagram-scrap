@@ -1,7 +1,10 @@
 .venv/
 .env
 accounts.json
+activity.json
 data/
 sessions/
 __pycache__/
 *.pyc
+browser_profiles/
+devices.json

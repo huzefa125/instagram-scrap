@@ -1,4 +1,4 @@
-"""Job Queue shared by every worker on every server, kept in the store (MongoDB in production).
+"""Shared job queue for workers on every server (MongoDB in production).
 
 Two kinds of jobs, each claimed with a lease so only one account works on it at a time:
 

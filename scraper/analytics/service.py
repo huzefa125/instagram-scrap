@@ -1,4 +1,4 @@
-"""Audience analytics computed from collected data.
+"""Audience analytics computed from collected data in storage.
 
 Rates over profile fields (business, categories, follower size, activity) use the
 enriched sample, since only those users have full profiles. `sample_size` says how many.

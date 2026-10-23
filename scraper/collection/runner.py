@@ -7,13 +7,13 @@ from pathlib import Path
 
 from instagrapi.exceptions import ClientError
 
-from .account import AccountState
+from ..accounts.state import AccountState
 from .collectors import Collector
-from .config import AccountConfig, Config, load_accounts
-from .jobqueue import WorkQueue
-from .worker import LOCK_TTL, Account, Worker
-from .ratelimit import RateGuard
-from .session import SessionManager, session_file
+from ..core.config import AccountConfig, Config, load_accounts
+from ..jobs.queue import WorkQueue
+from ..jobs.worker import LOCK_TTL, Account, Worker
+from ..accounts.rate_limit import RateGuard
+from ..accounts.session import SessionManager, session_file
 
 log = logging.getLogger(__name__)
 
@@ -65,8 +65,9 @@ def why_not_ready(config: Config, store, account: AccountConfig, force: bool,
     frozen, reason, until = state.frozen()
     if frozen and not force:
         return f"frozen until {until}: {reason}"
-    if state.requests_today() >= daily_limit(config, account):
-        return f"daily budget used ({state.requests_today()}/{daily_limit(config, account)})"
+    limit = state.effective_limit(daily_limit(config, account), config, persist=False)
+    if state.requests_today() >= limit:
+        return f"daily budget used ({state.requests_today()}/{limit})"
     if need_session and not session_file(config, account.username).exists():
         return "no saved session (run `python -m scraper login`)"
     return None

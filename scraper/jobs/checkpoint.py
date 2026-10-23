@@ -1,4 +1,4 @@
-"""Retry & Checkpoint Manager: remembers which stages finished for each influencer."""
+"""Retry and checkpoint state for each influencer."""
 
 from datetime import datetime, timezone
 

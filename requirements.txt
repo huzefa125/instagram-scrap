@@ -3,3 +3,5 @@ pymongo
 python-dotenv
 fastapi
 uvicorn
+playwright
+Appium-Python-Client

@@ -1,18 +1,19 @@
 import json
 import logging
 import os
+import re
 import socket
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(__file__).resolve().parent.parent.parent
 ACCOUNTS_FILE = ROOT / "accounts.json"
 load_dotenv(ROOT / ".env")
 log = logging.getLogger(__name__)
 
-ROLES = ("engagement", "audience", "both")
+ROLES = ("engagement", "audience", "both", "activity")
 
 
 def _int(name: str, default: int) -> int:
@@ -45,10 +46,24 @@ class Config:
     ig_timezone_offset: int
     delay_min: float
     delay_max: float
+    warmup_delay_min: float
+    warmup_delay_max: float
     max_requests_per_run: int
     max_requests_per_day: int
     worker_id: str
     poll_seconds: float
+    warmup_enabled: bool
+    warmup_start: int
+    warmup_growth: float     # 0.15 = +15% per working day
+    warmup_drop: float       # 0.5 = cut to 50% after a block
+    activity_enabled: bool
+    activity_file: Path
+    activity_browser: bool = False       # watch feed Reels in a real browser
+    browser_headless: bool = True
+    activity_mobile: bool = False        # watch feed Reels in Instagram Lite via Appium instead
+    devices_file: Path = Path("devices.json")
+    proxy_check_minutes: int = 30
+    trace_days: int = 14
 
 
 @dataclass(frozen=True)
@@ -57,7 +72,7 @@ class AccountConfig:
     username: str
     password: str
     proxy: str = ""
-    role: str = "both"                 # engagement | audience | both
+    role: str = "both"                 # engagement | audience | both | activity (daily activity only, no collection)
     max_requests_per_day: int | None = None   # None = MAX_REQUESTS_PER_DAY
 
 
@@ -81,21 +96,38 @@ def load_config() -> Config:
         ig_timezone_offset=_int("IG_TIMEZONE_OFFSET", 19800),
         delay_min=_float("DELAY_MIN", 2),
         delay_max=_float("DELAY_MAX", 6),
+        # Longer pauses while an account is still inside its warm-up ramp.
+        warmup_delay_min=_float("WARMUP_DELAY_MIN", 15),
+        warmup_delay_max=_float("WARMUP_DELAY_MAX", 45),
         max_requests_per_run=_int("MAX_REQUESTS_PER_RUN", 2000),
         max_requests_per_day=_int("MAX_REQUESTS_PER_DAY", 500),
         # Names this server in the shared queue and account locks; must differ per server.
         worker_id=os.getenv("WORKER_ID", "").strip() or socket.gethostname(),
         poll_seconds=_float("WORKER_POLL_SECONDS", 30),
+        warmup_enabled=os.getenv("WARMUP", "on").strip().lower() not in ("off", "0", "false", "no"),
+        warmup_start=_int("WARMUP_START_PER_DAY", 100),
+        warmup_growth=_float("WARMUP_GROWTH_PERCENT", 15) / 100,
+        warmup_drop=_float("WARMUP_DROP_PERCENT", 50) / 100,
+        activity_enabled=os.getenv("ACTIVITY_ENABLED", "off").strip().lower() in ("on", "1", "true", "yes"),
+        activity_file=ROOT / (os.getenv("ACTIVITY_FILE", "activity.json").strip() or "activity.json"),
+        activity_browser=os.getenv("ACTIVITY_BROWSER", "off").strip().lower() in ("on", "1", "true", "yes"),
+        browser_headless=os.getenv("BROWSER_HEADLESS", "on").strip().lower() in ("on", "1", "true", "yes"),
+        activity_mobile=os.getenv("ACTIVITY_MOBILE", "off").strip().lower() in ("on", "1", "true", "yes"),
+        devices_file=ROOT / (os.getenv("DEVICES_FILE", "devices.json").strip() or "devices.json"),
+        proxy_check_minutes=_int("PROXY_CHECK_MINUTES", 30),
+        trace_days=_int("TRACE_DAYS", 14),
     )
 
 
 def _numbered_env_accounts() -> list[AccountConfig]:
     """IG_USERNAME_1 / IG_PASSWORD_1 / PROXY_URL_1 / IG_ROLE_1 / IG_MAX_PER_DAY_1, then _2, _3 ...
 
-    Numbers may have gaps (e.g. comment out account 3 and 4, 5 still load); scans up to 200.
+    Numbers may have gaps; all configured numeric suffixes are discovered (including 200+).
     """
     accounts = []
-    for n in range(1, 201):
+    numbers = sorted({int(match.group(1)) for key in os.environ
+                      if (match := re.fullmatch(r"IG_USERNAME_([1-9][0-9]*)", key))})
+    for n in numbers:
         username = os.getenv(f"IG_USERNAME_{n}", "").strip()
         if not username:
             continue
